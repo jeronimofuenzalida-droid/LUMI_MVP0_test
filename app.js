@@ -1,4 +1,4 @@
-const API_URL = "PASTE_API_GATEWAY_INVOKE_URL_HERE/transcribe";
+const API_URL = "https://sh6ceuL3xa.execute-api.us-east-2.amazonaws.com/transcribe";
 
 const fileInput = document.getElementById("file");
 const btn = document.getElementById("btn");
