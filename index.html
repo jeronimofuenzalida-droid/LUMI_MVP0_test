@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>ASR MVP-test</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Upload Audio → Transcript</h1>
+
+      <label class="label">Upload an audio file (mp3/wav/m4a)</label>
+      <input id="file" type="file" accept="audio/*" />
+      <button id="btn" disabled>Transcribe</button>
+
+      <div id="status" class="status"></div>
+
+      <h2>Transcript</h2>
+      <p id="transcript" class="transcript">—</p>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
