@@ -4,7 +4,6 @@ import time
 import base64
 import uuid
 import urllib.request
-
 import boto3
 
 s3 = boto3.client("s3")
