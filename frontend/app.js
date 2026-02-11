@@ -9,7 +9,9 @@ fileInput.addEventListener("change", () => {
   btn.disabled = !(fileInput.files && fileInput.files.length);
 });
 
-function setStatus(msg) { statusEl.textContent = msg; }
+function setStatus(msg) {
+  statusEl.textContent = msg;
+}
 
 btn.addEventListener("click", async () => {
   const file = fileInput.files[0];
@@ -26,6 +28,20 @@ btn.addEventListener("click", async () => {
 
       const res = await fetch(API_URL, {
         method: "POST",
-        headers: { "Content-Type": "applicationdate & Time: configured (you already fixed this earlier)  
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          filename: file.name,
+          audio: base64
+        })
+      });
 
-If you answer those, I’ll give you the exact Lambda+API Gateway steps next.
+      const data = await res.json();
+      transcriptEl.textContent = data.transcript || data.error || "No transcript returned";
+      setStatus("Done.");
+    } catch (e) {
+      setStatus(`Error: ${e.message}`);
+    }
+  };
+
+  reader.readAsDataURL(file);
+});
