@@ -27,7 +27,7 @@ def _response(status_code: int, body: dict):
     }
 
 
-def handler(event, context):
+def lambda_handler(event, context):
     # Handle preflight CORS
     if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
         return _response(200, {"ok": True})
