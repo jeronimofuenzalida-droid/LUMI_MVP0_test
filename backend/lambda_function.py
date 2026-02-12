@@ -9,8 +9,9 @@ import boto3
 s3 = boto3.client("s3")
 transcribe = boto3.client("transcribe")
 
-TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
+
 AUDIO_BUCKET = os.environ["AUDIO_BUCKET"]
+TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
 LANGUAGE_CODE = os.environ.get("LANGUAGE_CODE", "en-US")  # change if needed
 MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "90"))  # short clips only
 
