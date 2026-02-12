@@ -9,6 +9,7 @@ import boto3
 s3 = boto3.client("s3")
 transcribe = boto3.client("transcribe")
 
+TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
 AUDIO_BUCKET = os.environ["AUDIO_BUCKET"]
 LANGUAGE_CODE = os.environ.get("LANGUAGE_CODE", "en-US")  # change if needed
 MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "90"))  # short clips only
@@ -98,6 +99,16 @@ def lambda_handler(event, context):
             transcript_json.get("results", {})
             .get("transcripts", [{}])[0]
             .get("transcript", "")
+        )
+
+
+        # Persist transcript to S3
+        transcript_key = f"transcripts/{job_name}.json"
+        s3.put_object(
+            Bucket=TRANSCRIPT_BUCKET,
+            Key=transcript_key,
+            Body=json.dumps(transcript_json).encode("utf-8"),
+            ContentType="application/json",
         )
 
         return _response(200, {"transcript": transcript_text})
