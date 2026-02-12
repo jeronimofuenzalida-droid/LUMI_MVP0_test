@@ -1,6 +1,49 @@
-body { font-family: system-ui, Arial, sans-serif; margin: 40px; }
-.wrap { max-width: 720px; }
-.label { display: block; margin-bottom: 8px; }
-button { margin-top: 12px; padding: 10px 14px; }
-.status { margin-top: 12px; color: #444; }
-.transcript { margin-top: 12px; white-space: pre-wrap; line-height: 1.4; }
+body {
+  font-family: system-ui, Arial, sans-serif;
+  margin: 40px;
+}
+
+.wrap {
+  max-width: 720px;
+}
+
+.label {
+  display: block;
+  margin-bottom: 8px;
+}
+
+button {
+  margin-top: 12px;
+  padding: 10px 14px;
+  cursor: pointer;
+}
+
+.status {
+  margin-top: 12px;
+  color: #444;
+}
+
+.transcript {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+/* ===== Added for diarization ===== */
+
+.line {
+  margin-bottom: 8px;
+}
+
+.spk {
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+/* Optional subtle visual separation */
+.transcript {
+  padding: 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  background-color: #fafafa;
+}
