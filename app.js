@@ -5,6 +5,7 @@ const btn = document.getElementById("btn");
 const statusEl = document.getElementById("status");
 const speakersEl = document.getElementById("speakers");
 const dialogueEl = document.getElementById("dialogue");
+const wordsWrap = document.getElementById("wordsWrap");
 
 let inFlight = false;
 
@@ -36,20 +37,56 @@ async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+function renderUniqueWordsTable(uniqueWords) {
+  if (!Array.isArray(uniqueWords) || uniqueWords.length === 0) {
+    wordsWrap.textContent = "—";
+    return;
+  }
+
+  const rows = uniqueWords.map(r => {
+    const sample = Array.isArray(r.unique_words_sample) ? r.unique_words_sample.join(", ") : "";
+    return `
+      <tr>
+        <td>${escapeHtml(r.speaker || "")}</td>
+        <td>${escapeHtml(String(r.unique_word_count ?? 0))}</td>
+        <td>${escapeHtml(sample)}</td>
+      </tr>
+    `;
+  }).join("");
+
+  wordsWrap.innerHTML = `
+    <table class="wordsTable">
+      <thead>
+        <tr>
+          <th>Speaker</th>
+          <th>Unique words</th>
+          <th>Sample (first 30)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table>
+  `;
+}
+
 btn.addEventListener("click", async () => {
   if (inFlight) return;
 
   const file = fileInput.files[0];
   if (!file) return;
 
+  // Reset UI
   speakersEl.textContent = "—";
   dialogueEl.textContent = "—";
+  wordsWrap.textContent = "—";
 
   setBusy(true);
 
   try {
     setStatus("Requesting upload URL...");
 
+    // 1) presign
     const presignRes = await fetch(`${API_BASE}/presign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -68,6 +105,7 @@ btn.addEventListener("click", async () => {
 
     const { upload_url, s3_key } = presignData;
 
+    // 2) upload to S3
     setStatus("Uploading to S3...");
     const putRes = await fetch(upload_url, {
       method: "PUT",
@@ -81,6 +119,7 @@ btn.addEventListener("click", async () => {
       return;
     }
 
+    // 3) start transcription
     setStatus("Starting transcription...");
     const startRes = await fetch(`${API_BASE}/transcribe`, {
       method: "POST",
@@ -98,7 +137,7 @@ btn.addEventListener("click", async () => {
     const jobName = startData.job_name;
     setStatus("Transcribing...");
 
-    // Poll status up to 15 minutes (adjust if needed)
+    // Poll up to 15 minutes
     const deadline = Date.now() + 15 * 60 * 1000;
 
     while (Date.now() < deadline) {
@@ -128,6 +167,8 @@ btn.addEventListener("click", async () => {
           dialogueEl.textContent = stData.transcript || "No transcript returned";
         }
 
+        renderUniqueWordsTable(stData.unique_words);
+
         setStatus("Done.");
         return;
       }
@@ -138,7 +179,6 @@ btn.addEventListener("click", async () => {
         return;
       }
 
-      // Still running/queued
       setStatus(`Transcribing... (${stData.status})`);
       await sleep(3000);
     }
