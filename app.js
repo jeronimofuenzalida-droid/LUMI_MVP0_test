@@ -32,13 +32,16 @@ fileInput.addEventListener("change", () => {
   if (!inFlight) btn.disabled = !(fileInput.files && fileInput.files.length);
 });
 
+async function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 btn.addEventListener("click", async () => {
   if (inFlight) return;
 
   const file = fileInput.files[0];
   if (!file) return;
 
-  // Reset UI for a clean run
   speakersEl.textContent = "—";
   dialogueEl.textContent = "—";
 
@@ -47,7 +50,6 @@ btn.addEventListener("click", async () => {
   try {
     setStatus("Requesting upload URL...");
 
-    // 1) Presign
     const presignRes = await fetch(`${API_BASE}/presign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -66,7 +68,6 @@ btn.addEventListener("click", async () => {
 
     const { upload_url, s3_key } = presignData;
 
-    // 2) Upload to S3
     setStatus("Uploading to S3...");
     const putRes = await fetch(upload_url, {
       method: "PUT",
@@ -80,36 +81,70 @@ btn.addEventListener("click", async () => {
       return;
     }
 
-    // 3) Transcribe
-    setStatus("Transcribing (with diarization)...");
-
-    const txRes = await fetch(`${API_BASE}/transcribe`, {
+    setStatus("Starting transcription...");
+    const startRes = await fetch(`${API_BASE}/transcribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ s3_key })
     });
 
-    const data = await txRes.json();
-    if (!txRes.ok) {
+    const startData = await startRes.json();
+    if (!startRes.ok) {
       setStatus("Error.");
-      dialogueEl.textContent = data.error || "Transcription failed";
+      dialogueEl.textContent = startData.error || "Start transcription failed";
       return;
     }
 
-    // Render
-    speakersEl.textContent = `Speakers detected: ${data.speaker_count ?? 0}`;
+    const jobName = startData.job_name;
+    setStatus("Transcribing...");
 
-    if (Array.isArray(data.speaker_lines) && data.speaker_lines.length) {
-      dialogueEl.innerHTML = data.speaker_lines.map((x) => {
-        const sp = escapeHtml(x.speaker || "speaker");
-        const tx = escapeHtml(x.text || "");
-        return `<div class="line"><span class="spk">${sp}:</span> ${tx}</div>`;
-      }).join("");
-    } else {
-      dialogueEl.textContent = data.transcript || "No transcript returned";
+    // Poll status up to 15 minutes (adjust if needed)
+    const deadline = Date.now() + 15 * 60 * 1000;
+
+    while (Date.now() < deadline) {
+      const stRes = await fetch(`${API_BASE}/status`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_name: jobName })
+      });
+
+      const stData = await stRes.json();
+      if (!stRes.ok) {
+        setStatus("Error.");
+        dialogueEl.textContent = stData.error || "Status check failed";
+        return;
+      }
+
+      if (stData.status === "COMPLETED") {
+        speakersEl.textContent = `Speakers detected: ${stData.speaker_count ?? 0}`;
+
+        if (Array.isArray(stData.speaker_lines) && stData.speaker_lines.length) {
+          dialogueEl.innerHTML = stData.speaker_lines.map((x) => {
+            const sp = escapeHtml(x.speaker || "speaker");
+            const tx = escapeHtml(x.text || "");
+            return `<div class="line"><span class="spk">${sp}:</span> ${tx}</div>`;
+          }).join("");
+        } else {
+          dialogueEl.textContent = stData.transcript || "No transcript returned";
+        }
+
+        setStatus("Done.");
+        return;
+      }
+
+      if (stData.status === "FAILED") {
+        setStatus("Error.");
+        dialogueEl.textContent = stData.error || "Transcription failed";
+        return;
+      }
+
+      // Still running/queued
+      setStatus(`Transcribing... (${stData.status})`);
+      await sleep(3000);
     }
 
-    setStatus("Done.");
+    setStatus("Error.");
+    dialogueEl.textContent = "Timed out waiting for transcription to complete.";
   } catch (e) {
     setStatus("Error.");
     dialogueEl.textContent = e?.message || "Unknown error";
