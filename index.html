@@ -1,24 +1,29 @@
-<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>ASR MVP-test</title>
-    <link rel="stylesheet" href="./styles.css" />
-  </head>
-  <body>
-    <div class="wrap">
-      <h1>Upload Audio → Transcript</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lumi Transcription</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
 
-      <label class="label">Upload an audio file (mp3/wav/m4a)</label>
-      <input id="file" type="file" accept="audio/*" />
-      <button id="btn" disabled>Transcribe</button>
+  <h1>Lumi Audio Transcription</h1>
 
-      <div id="status" class="status"></div>
+  <div class="card">
+    <input type="file" id="file" accept=".mp3,.wav,.m4a" />
+    <button id="btn" disabled>Transcribe</button>
+  </div>
 
-      <h2>Transcript</h2>
-      <p id="transcript" class="transcript">—</p>
-    </div>
+  <h2>Status</h2>
+  <div id="status" class="status">—</div>
 
-    <script src="./app.js"></script>
-  </body>
+  <h2>Speakers</h2>
+  <div id="speakers" class="status">—</div>
+
+  <h2>Transcript</h2>
+  <div id="dialogue" class="transcript">—</div>
+
+  <script src="app.js"></script>
+</body>
 </html>
