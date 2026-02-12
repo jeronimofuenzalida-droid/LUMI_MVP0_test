@@ -43,81 +43,72 @@ def _read_json_body(event) -> dict:
         body_raw = base64.b64decode(body_raw).decode("utf-8", errors="replace")
     return json.loads(body_raw)
 
-
 def _speaker_turns_from_transcribe_json(transcript_json: dict):
-    """
-    Returns:
-      speaker_count: int
-      speaker_lines: [{ "speaker": "speaker 1", "text": "..." }, ...]
-    """
     results = transcript_json.get("results", {})
     items = results.get("items", [])
-    segments = (results.get("speaker_labels", {}) or {}).get("segments", [])
-
-    full_text = (results.get("transcripts", [{}])[0] or {}).get("transcript", "")
+    speaker_segments = (results.get("speaker_labels", {}) or {}).get("segments", [])
 
     # Fallback if diarization missing
-    if not segments:
+    if not speaker_segments:
+        full_text = (results.get("transcripts", [{}])[0] or {}).get("transcript", "")
         return 1, [{"speaker": "speaker 1", "text": full_text}]
 
-    # Map start_time -> spk label
-    time_to_speaker = {}
-    for seg in segments:
-        sp = seg.get("speaker_label")
-        for it in seg.get("items", []):
-            st = it.get("start_time")
-            if st is not None:
-                time_to_speaker[st] = sp
+    # Build a timeline of speaker segments with start/end times
+    segments = []
+    for seg in speaker_segments:
+        segments.append({
+            "speaker": seg["speaker_label"],
+            "start": float(seg["start_time"]),
+            "end": float(seg["end_time"])
+        })
 
-    turns = []
-    cur_speaker = None
-    cur_tokens = []
+    speaker_lines = []
+    current_speaker = None
+    current_tokens = []
 
-    def flush():
-        nonlocal cur_tokens, cur_speaker
-        if cur_speaker is not None and cur_tokens:
-            txt = "".join(cur_tokens).strip()
-            if txt:
-                turns.append({"speaker": cur_speaker, "text": txt})
-        cur_tokens = []
+    seg_index = 0
 
-    for it in items:
-        typ = it.get("type")
-        alt = (it.get("alternatives") or [{}])[0]
-        content = alt.get("content", "")
+    for item in items:
+        if item["type"] != "pronunciation":
+            continue
 
-        if typ == "pronunciation":
-            st = it.get("start_time")
-            sp = time_to_speaker.get(st, cur_speaker)
+        start_time = float(item["start_time"])
 
-            if sp != cur_speaker:
-                flush()
-                cur_speaker = sp
+        # Move segment pointer if needed
+        while seg_index < len(segments) and start_time > segments[seg_index]["end"]:
+            seg_index += 1
 
-            if not cur_tokens:
-                cur_tokens.append(content)
-            else:
-                cur_tokens.append(" " + content)
+        if seg_index >= len(segments):
+            break
 
-        elif typ == "punctuation":
-            if cur_tokens:
-                cur_tokens[-1] += content
+        speaker = segments[seg_index]["speaker"]
 
-    flush()
+        if speaker != current_speaker:
+            if current_tokens:
+                speaker_lines.append({
+                    "speaker": current_speaker,
+                    "text": " ".join(current_tokens)
+                })
+            current_speaker = speaker
+            current_tokens = []
 
-    # Stable speaker numbering: spk_0 -> speaker 1, etc.
-    def spk_sort_key(s):
-        try:
-            return int(s.split("_")[1])
-        except Exception:
-            return 999999
+        current_tokens.append(item["alternatives"][0]["content"])
 
-    unique = sorted({t["speaker"] for t in turns if t.get("speaker")}, key=spk_sort_key)
+    if current_tokens:
+        speaker_lines.append({
+            "speaker": current_speaker,
+            "text": " ".join(current_tokens)
+        })
+
+    # Normalize speaker labels
+    unique = sorted(set(line["speaker"] for line in speaker_lines))
     mapping = {sp: f"speaker {i+1}" for i, sp in enumerate(unique)}
 
-    speaker_lines = [{"speaker": mapping.get(t["speaker"], t["speaker"]), "text": t["text"]} for t in turns]
-    speaker_count = len(unique) if unique else 1
-    return speaker_count, speaker_lines
+    for line in speaker_lines:
+        line["speaker"] = mapping.get(line["speaker"], "speaker 1")
+
+    return len(unique), speaker_lines
+
 
 
 def _handle_presign(event):
