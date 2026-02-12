@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import uuid
 import urllib.request
 import re
@@ -44,49 +43,23 @@ def _read_json_body(event) -> dict:
 
 
 # -------------------------
-# De-duplication helpers
+# De-duplication utilities
 # -------------------------
 
-def _normalize_space(s: str) -> str:
+def _norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
-def _dedupe_exact_sentence_repeat(text: str) -> str:
+def _dedupe_immediate_repeated_ngrams(text: str, n_min: int = 2, n_max: int = 12) -> str:
     """
-    Removes exact back-to-back repetition like:
-      "A. A." or "A? A?" or "A A"
+    Removes immediate repeated n-grams (exact repeated word sequences).
+    n_min=2 ensures we do NOT remove single-word repeats like "yes yes".
+    This fixes cases like:
+      "At 11:30 At 11:30"
+      "Sure with cookies Sure with cookies"
+      "That's good, thank you. That's good, thank you."
     """
-    t = _normalize_space(text)
-    if not t:
-        return t
-
-    # Whole-string exact double
-    if len(t) % 2 == 0:
-        mid = len(t) // 2
-        left, right = t[:mid].strip(), t[mid:].strip()
-        if left and left == right:
-            return left
-
-    # Sentence-level immediate duplicates
-    parts = re.split(r"(?<=[.!?])\s+", t)
-    out = []
-    for p in parts:
-        p = p.strip()
-        if not p:
-            continue
-        if out and p == out[-1]:
-            continue
-        out.append(p)
-    return " ".join(out)
-
-
-def _dedupe_repeated_ngrams(text: str, n_min: int = 5, n_max: int = 12) -> str:
-    """
-    Removes immediate repeated n-grams (word sequences), conservatively.
-    Example:
-      "my throat hurts my throat hurts" -> "my throat hurts"
-    """
-    words = _normalize_space(text).split()
+    words = _norm_space(text).split()
     if len(words) < 2 * n_min:
         return " ".join(words)
 
@@ -99,7 +72,7 @@ def _dedupe_repeated_ngrams(text: str, n_min: int = 5, n_max: int = 12) -> str:
             a = words[i:i + n]
             b = words[i + n:i + 2 * n]
             if a == b:
-                out.extend(a)          # keep one copy
+                out.extend(a)        # keep one copy
                 i += 2 * n
                 removed = True
                 break
@@ -111,9 +84,30 @@ def _dedupe_repeated_ngrams(text: str, n_min: int = 5, n_max: int = 12) -> str:
 
 
 def _dedupe_text(text: str) -> str:
-    t = _dedupe_exact_sentence_repeat(text)
-    t = _dedupe_repeated_ngrams(t)
-    return t
+    # Run twice to catch cascaded repeats (rare but happens)
+    t = _dedupe_immediate_repeated_ngrams(text, n_min=2, n_max=12)
+    t = _dedupe_immediate_repeated_ngrams(t, n_min=2, n_max=12)
+    return _norm_space(t)
+
+
+def _drop_consecutive_duplicate_lines(lines):
+    """
+    Drops consecutive duplicate lines even if the speaker differs.
+    Fixes cases like:
+      speaker 1: "How many words do you need"
+      speaker 3: "How many words do you need"
+    """
+    cleaned = []
+    prev_key = None
+    for ln in lines:
+        txt = _norm_space(ln.get("text", "")).lower()
+        if not txt:
+            continue
+        if txt == prev_key:
+            continue
+        cleaned.append(ln)
+        prev_key = txt
+    return cleaned
 
 
 # -------------------------
@@ -131,62 +125,83 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
         full_text = _dedupe_text(full_text)
         return 1, [{"speaker": "speaker 1", "text": full_text}]
 
-    # Build segment timeline with start/end times
-    segments = []
-    for seg in speaker_segments:
-        segments.append({
-            "speaker": seg["speaker_label"],
-            "start": float(seg["start_time"]),
-            "end": float(seg["end_time"]),
-        })
+    # Segment timeline (sorted)
+    segments = sorted(
+        [
+            {
+                "speaker": seg["speaker_label"],
+                "start": float(seg["start_time"]),
+                "end": float(seg["end_time"]),
+            }
+            for seg in speaker_segments
+            if "start_time" in seg and "end_time" in seg and "speaker_label" in seg
+        ],
+        key=lambda x: x["start"],
+    )
 
     speaker_lines = []
     current_speaker = None
-    current_tokens = []
+    current_text = ""
     seg_index = 0
 
+    def flush():
+        nonlocal current_text, current_speaker
+        if current_speaker is not None:
+            txt = _norm_space(current_text)
+            if txt:
+                speaker_lines.append({"speaker": current_speaker, "text": txt})
+        current_text = ""
+
     for item in items:
-        if item.get("type") != "pronunciation":
-            continue
+        typ = item.get("type")
 
-        start_time = float(item["start_time"])
+        if typ == "pronunciation":
+            start_time = float(item["start_time"])
 
-        # Advance segment pointer
-        while seg_index < len(segments) and start_time > segments[seg_index]["end"]:
-            seg_index += 1
+            # Move to the correct segment
+            while seg_index < len(segments) and start_time > segments[seg_index]["end"]:
+                seg_index += 1
+            if seg_index >= len(segments):
+                break
 
-        if seg_index >= len(segments):
-            break
+            speaker = segments[seg_index]["speaker"]
+            word = item["alternatives"][0]["content"]
 
-        speaker = segments[seg_index]["speaker"]
+            # Speaker change -> new line
+            if speaker != current_speaker:
+                flush()
+                current_speaker = speaker
 
-        if speaker != current_speaker:
-            if current_tokens:
-                speaker_lines.append({
-                    "speaker": current_speaker,
-                    "text": " ".join(current_tokens),
-                })
-            current_speaker = speaker
-            current_tokens = []
+            # Add word with spacing
+            if not current_text:
+                current_text = word
+            else:
+                current_text += " " + word
 
-        current_tokens.append(item["alternatives"][0]["content"])
+        elif typ == "punctuation":
+            # Attach punctuation to the current text (no extra space)
+            if current_text:
+                punct = item["alternatives"][0]["content"]
+                current_text += punct
 
-    if current_tokens:
-        speaker_lines.append({
-            "speaker": current_speaker,
-            "text": " ".join(current_tokens),
-        })
+    flush()
 
-    # Normalize speaker labels (stable numbering)
-    unique = sorted(set(line["speaker"] for line in speaker_lines if line["speaker"]))
-    mapping = {sp: f"speaker {i + 1}" for i, sp in enumerate(unique)}
+    # Normalize speaker labels to speaker 1..N using stable order spk_0, spk_1...
+    def spk_key(s):
+        try:
+            return int(str(s).split("_")[1])
+        except Exception:
+            return 999999
 
-    for line in speaker_lines:
-        line["speaker"] = mapping.get(line["speaker"], "speaker 1")
-        line["text"] = _dedupe_text(line.get("text", ""))
+    unique = sorted({ln["speaker"] for ln in speaker_lines if ln.get("speaker")}, key=spk_key)
+    mapping = {sp: f"speaker {i+1}" for i, sp in enumerate(unique)}
 
-    # Drop empty lines after dedupe
-    speaker_lines = [l for l in speaker_lines if _normalize_space(l.get("text", ""))]
+    for ln in speaker_lines:
+        ln["speaker"] = mapping.get(ln["speaker"], "speaker 1")
+        ln["text"] = _dedupe_text(ln.get("text", ""))
+
+    # Drop consecutive duplicates (even across speakers)
+    speaker_lines = _drop_consecutive_duplicate_lines(speaker_lines)
 
     return (len(unique) if unique else 1), speaker_lines
 
@@ -197,110 +212,4 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
 
 def _handle_presign(event):
     payload = _read_json_body(event)
-    filename = payload.get("filename", "audio")
-    content_type = payload.get("content_type", "application/octet-stream")
-
-    ext = (filename.split(".")[-1] or "").lower()
-    if ext not in {"mp3", "wav", "m4a"}:
-        return _response(400, {"error": f"Unsupported file type: .{ext}. Use mp3/wav/m4a."})
-
-    key = f"uploads/{uuid.uuid4().hex}.{ext}"
-
-    url = s3.generate_presigned_url(
-        ClientMethod="put_object",
-        Params={"Bucket": AUDIO_BUCKET, "Key": key, "ContentType": content_type},
-        ExpiresIn=600,
-    )
-    return _response(200, {"upload_url": url, "s3_key": key})
-
-
-def _handle_transcribe_start(event):
-    payload = _read_json_body(event)
-    s3_key = payload.get("s3_key")
-    if not s3_key:
-        return _response(400, {"error": "Missing 's3_key'."})
-
-    media_uri = f"s3://{AUDIO_BUCKET}/{s3_key}"
-    job_name = f"lumi-{uuid.uuid4().hex}"
-
-    transcribe.start_transcription_job(
-        TranscriptionJobName=job_name,
-        LanguageCode=LANGUAGE_CODE,
-        Media={"MediaFileUri": media_uri},
-        Settings={
-            "ShowSpeakerLabels": True,
-            "MaxSpeakerLabels": MAX_SPEAKERS,
-            "ShowAlternatives": False,
-        },
-    )
-
-    return _response(200, {"job_name": job_name})
-
-
-def _handle_transcribe_status(event):
-    payload = _read_json_body(event)
-    job_name = payload.get("job_name")
-    if not job_name:
-        return _response(400, {"error": "Missing 'job_name'."})
-
-    job = transcribe.get_transcription_job(TranscriptionJobName=job_name)
-    tj = job["TranscriptionJob"]
-    status = tj["TranscriptionJobStatus"]
-
-    if status == "FAILED":
-        return _response(200, {"status": "FAILED", "error": tj.get("FailureReason", "Unknown failure")})
-
-    if status != "COMPLETED":
-        return _response(200, {"status": status})
-
-    transcript_url = tj["Transcript"]["TranscriptFileUri"]
-
-    with urllib.request.urlopen(transcript_url) as resp:
-        transcript_json = json.loads(resp.read().decode("utf-8"))
-
-    transcript_text = (
-        transcript_json.get("results", {})
-        .get("transcripts", [{}])[0]
-        .get("transcript", "")
-    )
-    transcript_text = _dedupe_text(transcript_text)
-
-    # Save JSON for inspection/debugging
-    transcript_key = f"transcripts/{job_name}.json"
-    s3.put_object(
-        Bucket=TRANSCRIPT_BUCKET,
-        Key=transcript_key,
-        Body=json.dumps(transcript_json).encode("utf-8"),
-        ContentType="application/json",
-    )
-
-    speaker_count, speaker_lines = _speaker_turns_from_transcribe_json(transcript_json)
-
-    return _response(
-        200,
-        {
-            "status": "COMPLETED",
-            "transcript": transcript_text,
-            "speaker_count": speaker_count,
-            "speaker_lines": speaker_lines,
-        },
-    )
-
-
-def lambda_handler(event, context):
-    # CORS preflight
-    if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
-        return _response(200, {"ok": True})
-
-    path = _get_path(event)
-
-    try:
-        if path.endswith("/presign"):
-            return _handle_presign(event)
-        if path.endswith("/transcribe"):
-            return _handle_transcribe_start(event)
-        if path.endswith("/status"):
-            return _handle_transcribe_status(event)
-        return _response(404, {"error": f"Unknown route: {path}. Use /presign, /transcribe, /status."})
-    except Exception as e:
-        return _response(500, {"error": str(e)})
+    filename = payload.get("filena
