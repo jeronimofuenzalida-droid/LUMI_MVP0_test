@@ -13,7 +13,6 @@ AUDIO_BUCKET = os.environ["AUDIO_BUCKET"]
 TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
 LANGUAGE_CODE = os.environ.get("LANGUAGE_CODE", "en-US")
 
-MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "180"))
 MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "10"))
 
 
@@ -43,6 +42,7 @@ def _read_json_body(event) -> dict:
         body_raw = base64.b64decode(body_raw).decode("utf-8", errors="replace")
     return json.loads(body_raw)
 
+
 def _speaker_turns_from_transcribe_json(transcript_json: dict):
     results = transcript_json.get("results", {})
     items = results.get("items", [])
@@ -53,7 +53,7 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
         full_text = (results.get("transcripts", [{}])[0] or {}).get("transcript", "")
         return 1, [{"speaker": "speaker 1", "text": full_text}]
 
-    # Build a timeline of speaker segments with start/end times
+    # Build segment timeline with start/end times
     segments = []
     for seg in speaker_segments:
         segments.append({
@@ -65,16 +65,14 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
     speaker_lines = []
     current_speaker = None
     current_tokens = []
-
     seg_index = 0
 
     for item in items:
-        if item["type"] != "pronunciation":
+        if item.get("type") != "pronunciation":
             continue
 
         start_time = float(item["start_time"])
 
-        # Move segment pointer if needed
         while seg_index < len(segments) and start_time > segments[seg_index]["end"]:
             seg_index += 1
 
@@ -101,14 +99,13 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
         })
 
     # Normalize speaker labels
-    unique = sorted(set(line["speaker"] for line in speaker_lines))
+    unique = sorted(set(line["speaker"] for line in speaker_lines if line["speaker"]))
     mapping = {sp: f"speaker {i+1}" for i, sp in enumerate(unique)}
 
     for line in speaker_lines:
         line["speaker"] = mapping.get(line["speaker"], "speaker 1")
 
     return len(unique), speaker_lines
-
 
 
 def _handle_presign(event):
@@ -130,11 +127,11 @@ def _handle_presign(event):
     return _response(200, {"upload_url": url, "s3_key": key})
 
 
-def _handle_transcribe(event):
+def _handle_transcribe_start(event):
     payload = _read_json_body(event)
     s3_key = payload.get("s3_key")
     if not s3_key:
-        return _response(400, {"error": "Missing 's3_key'. Call /presign, upload to S3, then call /transcribe."})
+        return _response(400, {"error": "Missing 's3_key'."})
 
     media_uri = f"s3://{AUDIO_BUCKET}/{s3_key}"
     job_name = f"lumi-{uuid.uuid4().hex}"
@@ -150,21 +147,28 @@ def _handle_transcribe(event):
         },
     )
 
-    deadline = time.time() + MAX_WAIT_SECONDS
-    while time.time() < deadline:
-        job = transcribe.get_transcription_job(TranscriptionJobName=job_name)
-        status = job["TranscriptionJob"]["TranscriptionJobStatus"]
-        if status in ("COMPLETED", "FAILED"):
-            break
-        time.sleep(2)
+    # Return immediately (async)
+    return _response(200, {"job_name": job_name})
+
+
+def _handle_transcribe_status(event):
+    payload = _read_json_body(event)
+    job_name = payload.get("job_name")
+    if not job_name:
+        return _response(400, {"error": "Missing 'job_name'."})
 
     job = transcribe.get_transcription_job(TranscriptionJobName=job_name)
-    status = job["TranscriptionJob"]["TranscriptionJobStatus"]
-    if status != "COMPLETED":
-        reason = job["TranscriptionJob"].get("FailureReason", "Transcription did not complete in time.")
-        return _response(504, {"error": reason})
+    tj = job["TranscriptionJob"]
+    status = tj["TranscriptionJobStatus"]
 
-    transcript_url = job["TranscriptionJob"]["Transcript"]["TranscriptFileUri"]
+    if status == "FAILED":
+        return _response(200, {"status": "FAILED", "error": tj.get("FailureReason", "Unknown failure")})
+
+    if status != "COMPLETED":
+        return _response(200, {"status": status})
+
+    transcript_url = tj["Transcript"]["TranscriptFileUri"]
+
     with urllib.request.urlopen(transcript_url) as resp:
         transcript_json = json.loads(resp.read().decode("utf-8"))
 
@@ -174,7 +178,7 @@ def _handle_transcribe(event):
         .get("transcript", "")
     )
 
-    # Save JSON for debugging/audit
+    # Save JSON
     transcript_key = f"transcripts/{job_name}.json"
     s3.put_object(
         Bucket=TRANSCRIPT_BUCKET,
@@ -188,6 +192,7 @@ def _handle_transcribe(event):
     return _response(
         200,
         {
+            "status": "COMPLETED",
             "transcript": transcript_text,
             "speaker_count": speaker_count,
             "speaker_lines": speaker_lines,
@@ -206,7 +211,9 @@ def lambda_handler(event, context):
         if path.endswith("/presign"):
             return _handle_presign(event)
         if path.endswith("/transcribe"):
-            return _handle_transcribe(event)
-        return _response(404, {"error": f"Unknown route: {path}. Use /presign or /transcribe."})
+            return _handle_transcribe_start(event)
+        if path.endswith("/status"):
+            return _handle_transcribe_status(event)
+        return _response(404, {"error": f"Unknown route: {path}. Use /presign, /transcribe, /status."})
     except Exception as e:
         return _response(500, {"error": str(e)})
