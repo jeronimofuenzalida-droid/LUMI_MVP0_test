@@ -8,75 +8,103 @@ const btn = document.getElementById("btn");
 const statusEl = document.getElementById("status");
 const transcriptEl = document.getElementById("transcript");
 
-fileInput.addEventListener("change", () => {
-  btn.disabled = !(fileInput.files && fileInput.files.length);
-});
-
 function setStatus(msg) {
   statusEl.textContent = msg;
 }
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Ensure change always fires even if user re-selects the same file
+fileInput.addEventListener("click", () => {
+  fileInput.value = null;
+});
+
+fileInput.addEventListener("change", () => {
+  btn.disabled = !(fileInput.files && fileInput.files.length);
+});
+
 btn.addEventListener("click", async () => {
-  const file = fileInput.files[0];
+  const file = fileInput.files && fileInput.files[0];
   if (!file) return;
 
   transcriptEl.textContent = "—";
 
   try {
+    // 1) Get presigned URL
     setStatus("Getting upload URL...");
-
-    // 1️⃣ Get presigned URL
     const presignRes = await fetch(PRESIGN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         filename: file.name,
-        contentType: file.type || "application/octet-stream"
-      })
+        contentType: file.type || "application/octet-stream",
+      }),
     });
 
     const presignData = await presignRes.json();
-
     if (!presignRes.ok) {
-      setStatus(`Error: ${presignData.error}`);
+      setStatus(`Error (presign): ${presignData.error || "unknown"}`);
       return;
     }
 
-    // 2️⃣ Upload file directly to S3
+    // 2) Upload to S3
     setStatus("Uploading to S3...");
-
     const uploadRes = await fetch(presignData.uploadUrl, {
       method: "PUT",
       headers: { "Content-Type": file.type || "application/octet-stream" },
-      body: file
+      body: file,
     });
 
     if (!uploadRes.ok) {
-      setStatus(`Upload failed (${uploadRes.status})`);
+      setStatus(`Error (upload): HTTP ${uploadRes.status}`);
       return;
     }
 
-    // 3️⃣ Start transcription
+    // 3) Start transcription
     setStatus("Starting transcription...");
-
     const startRes = await fetch(TRANSCRIBE_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         key: presignData.key,
-        filename: file.name
-      })
+        filename: file.name,
+      }),
     });
 
     const startData = await startRes.json();
-
     if (!startRes.ok) {
-      setStatus(`Error: ${startData.error}`);
+      setStatus(`Error (start): ${startData.error || "unknown"}`);
       return;
     }
 
-    const jobName = star
+    const jobName = startData.jobName;
+    setStatus(`Transcribing... (${jobName})`);
+
+    // 4) Poll status
+    while (true) {
+      await sleep(2000);
+
+      const statusRes = await fetch(
+        `${STATUS_URL}?jobName=${encodeURIComponent(jobName)}`
+      );
+      const statusData = await statusRes.json();
+
+      if (statusData.status === "COMPLETED") {
+        transcriptEl.textContent = statusData.transcript || "No transcript returned";
+        setStatus("Done.");
+        return;
+      }
+
+      if (statusData.status === "FAILED") {
+        setStatus(`Failed: ${statusData.error || "unknown"}`);
+        return;
+      }
+
+      setStatus(`Status: ${statusData.status}`);
+    }
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+  }
+});
