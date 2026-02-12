@@ -13,11 +13,11 @@ AUDIO_BUCKET = os.environ["AUDIO_BUCKET"]
 TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
 LANGUAGE_CODE = os.environ.get("LANGUAGE_CODE", "en-US")
 
-# IMPORTANT: Lambda timeout must be >= MAX_WAIT_SECONDS (+ a bit)
-MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "120"))
+# Increase Lambda timeout to be >= this value (+ buffer)
+MAX_WAIT_SECONDS = int(os.environ.get("MAX_WAIT_SECONDS", "180"))
 
-# For diarization: Transcribe needs MaxSpeakerLabels when ShowSpeakerLabels=true
-MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "10"))  # 2..30 supported by Transcribe :contentReference[oaicite:2]{index=2}
+# Transcribe requires MaxSpeakerLabels when ShowSpeakerLabels=True
+MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "10"))
 
 
 def _response(status_code: int, body: dict):
@@ -35,7 +35,7 @@ def _response(status_code: int, body: dict):
 
 def _speaker_turns_from_transcribe_json(transcript_json: dict):
     """
-    Produces:
+    Returns:
       speaker_count: int
       speaker_lines: [{ "speaker": "speaker 1", "text": "..." }, ...]
     """
@@ -44,12 +44,13 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
     speaker_labels = results.get("speaker_labels", {})
     segments = speaker_labels.get("segments", [])
 
-    # If diarization isn't present, fall back to 1 speaker with full transcript
     full_text = (results.get("transcripts", [{}])[0] or {}).get("transcript", "")
+
+    # If diarization missing, fallback
     if not segments:
         return 1, [{"speaker": "speaker 1", "text": full_text}]
 
-    # Build mapping from word start_time -> speaker_label (spk_0, spk_1, ...)
+    # Map word start_time -> speaker_label (spk_0, spk_1, ...)
     time_to_speaker = {}
     for seg in segments:
         sp = seg.get("speaker_label")
@@ -58,7 +59,6 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
             if st is not None:
                 time_to_speaker[st] = sp
 
-    # Walk the main "items" list (keeps punctuation)
     turns = []
     cur_speaker = None
     cur_tokens = []
@@ -80,7 +80,6 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
             st = it.get("start_time")
             sp = time_to_speaker.get(st, cur_speaker)
 
-            # New speaker => new line
             if sp != cur_speaker:
                 flush()
                 cur_speaker = sp
@@ -96,7 +95,6 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
 
     flush()
 
-    # Map spk_0.. to speaker 1.. (stable ordering)
     def spk_sort_key(s):
         try:
             return int(s.split("_")[1])
@@ -108,12 +106,11 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
 
     speaker_lines = [{"speaker": mapping.get(t["speaker"], t["speaker"]), "text": t["text"]} for t in turns]
     speaker_count = len(unique) if unique else 1
-
     return speaker_count, speaker_lines
 
 
 def lambda_handler(event, context):
-    # Handle preflight CORS
+    # CORS preflight
     if event.get("requestContext", {}).get("http", {}).get("method") == "OPTIONS":
         return _response(200, {"ok": True})
 
@@ -145,7 +142,6 @@ def lambda_handler(event, context):
         media_uri = f"s3://{AUDIO_BUCKET}/{key}"
         job_name = f"lumi-{uuid.uuid4().hex}"
 
-        # Enable diarization (speaker labels)
         transcribe.start_transcription_job(
             TranscriptionJobName=job_name,
             LanguageCode=LANGUAGE_CODE,
@@ -157,7 +153,6 @@ def lambda_handler(event, context):
             },
         )
 
-        # Poll until job completes (short files only)
         deadline = time.time() + MAX_WAIT_SECONDS
         while time.time() < deadline:
             job = transcribe.get_transcription_job(TranscriptionJobName=job_name)
@@ -184,7 +179,6 @@ def lambda_handler(event, context):
             .get("transcript", "")
         )
 
-        # Persist transcript JSON to S3
         transcript_key = f"transcripts/{job_name}.json"
         s3.put_object(
             Bucket=TRANSCRIPT_BUCKET,
@@ -198,9 +192,9 @@ def lambda_handler(event, context):
         return _response(
             200,
             {
-                "transcript": transcript_text,          # keep backward compatibility
+                "transcript": transcript_text,     # fallback
                 "speaker_count": speaker_count,
-                "speaker_lines": speaker_lines,         # [{speaker:"speaker 1", text:"..."}, ...]
+                "speaker_lines": speaker_lines,
             },
         )
 
