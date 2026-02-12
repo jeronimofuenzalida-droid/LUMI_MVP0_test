@@ -1,4 +1,4 @@
-// IMPORTANT: keep your correct API endpoint here
+// IMPORTANT: keep the API id lowercase "l" -> sh6ceul3xa
 const API_URL = "https://sh6ceul3xa.execute-api.us-east-2.amazonaws.com/transcribe";
 
 const fileInput = document.getElementById("file");
@@ -7,32 +7,31 @@ const statusEl = document.getElementById("status");
 const speakersEl = document.getElementById("speakers");
 const dialogueEl = document.getElementById("dialogue");
 
-fileInput.addEventListener("change", () => {
-  btn.disabled = !(fileInput.files && fileInput.files.length);
-});
-
 function setStatus(msg) {
   statusEl.textContent = msg;
 }
 
 function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, function (c) {
-    return {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;"
-    }[c];
-  });
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[c]));
 }
+
+fileInput.addEventListener("change", () => {
+  btn.disabled = !(fileInput.files && fileInput.files.length);
+});
 
 btn.addEventListener("click", async () => {
   const file = fileInput.files[0];
   if (!file) return;
 
-  dialogueEl.textContent = "—";
+  // Reset UI
   speakersEl.textContent = "—";
+  dialogueEl.textContent = "—";
   setStatus("Reading file...");
 
   const reader = new FileReader();
@@ -43,47 +42,35 @@ btn.addEventListener("click", async () => {
 
       const base64 = reader.result.split(",")[1];
 
-      const response = await fetch(API_URL, {
+      const res = await fetch(API_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          filename: file.name,
-          audio: base64
-        })
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: file.name, audio: base64 })
       });
 
-      const data = await response.json();
+      const data = await res.json();
 
-      if (!response.ok) {
+      if (!res.ok) {
         setStatus("Error.");
         dialogueEl.textContent = data.error || "Request failed";
         return;
       }
 
-      // Show number of speakers first
-      const count = data.speaker_count ?? 0;
-      speakersEl.textContent = `Speakers detected: ${count}`;
+      speakersEl.textContent = `Speakers detected: ${data.speaker_count ?? 0}`;
 
-      // Render speaker lines
       if (Array.isArray(data.speaker_lines) && data.speaker_lines.length) {
-        const html = data.speaker_lines.map(line => {
-          const speaker = escapeHtml(line.speaker || "speaker");
-          const text = escapeHtml(line.text || "");
-          return `<div class="line"><span class="spk">${speaker}:</span> ${text}</div>`;
+        dialogueEl.innerHTML = data.speaker_lines.map((x) => {
+          const sp = escapeHtml(x.speaker || "speaker");
+          const tx = escapeHtml(x.text || "");
+          return `<div class="line"><span class="spk">${sp}:</span> ${tx}</div>`;
         }).join("");
-
-        dialogueEl.innerHTML = html;
       } else {
-        // fallback to full transcript if diarization missing
         dialogueEl.textContent = data.transcript || "No transcript returned";
       }
 
       setStatus("Done.");
-
-    } catch (err) {
-      setStatus("Error: " + err.message);
+    } catch (e) {
+      setStatus("Error: " + e.message);
     }
   };
 
