@@ -3,6 +3,7 @@ import json
 import time
 import uuid
 import urllib.request
+import re
 
 import boto3
 
@@ -12,7 +13,6 @@ transcribe = boto3.client("transcribe")
 AUDIO_BUCKET = os.environ["AUDIO_BUCKET"]
 TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", AUDIO_BUCKET)
 LANGUAGE_CODE = os.environ.get("LANGUAGE_CODE", "en-US")
-
 MAX_SPEAKERS = int(os.environ.get("MAX_SPEAKERS", "10"))
 
 
@@ -43,6 +43,83 @@ def _read_json_body(event) -> dict:
     return json.loads(body_raw)
 
 
+# -------------------------
+# De-duplication helpers
+# -------------------------
+
+def _normalize_space(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _dedupe_exact_sentence_repeat(text: str) -> str:
+    """
+    Removes exact back-to-back repetition like:
+      "A. A." or "A? A?" or "A A"
+    """
+    t = _normalize_space(text)
+    if not t:
+        return t
+
+    # Whole-string exact double
+    if len(t) % 2 == 0:
+        mid = len(t) // 2
+        left, right = t[:mid].strip(), t[mid:].strip()
+        if left and left == right:
+            return left
+
+    # Sentence-level immediate duplicates
+    parts = re.split(r"(?<=[.!?])\s+", t)
+    out = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        if out and p == out[-1]:
+            continue
+        out.append(p)
+    return " ".join(out)
+
+
+def _dedupe_repeated_ngrams(text: str, n_min: int = 5, n_max: int = 12) -> str:
+    """
+    Removes immediate repeated n-grams (word sequences), conservatively.
+    Example:
+      "my throat hurts my throat hurts" -> "my throat hurts"
+    """
+    words = _normalize_space(text).split()
+    if len(words) < 2 * n_min:
+        return " ".join(words)
+
+    i = 0
+    out = []
+    while i < len(words):
+        removed = False
+        max_n_here = min(n_max, (len(words) - i) // 2)
+        for n in range(max_n_here, n_min - 1, -1):
+            a = words[i:i + n]
+            b = words[i + n:i + 2 * n]
+            if a == b:
+                out.extend(a)          # keep one copy
+                i += 2 * n
+                removed = True
+                break
+        if not removed:
+            out.append(words[i])
+            i += 1
+
+    return " ".join(out)
+
+
+def _dedupe_text(text: str) -> str:
+    t = _dedupe_exact_sentence_repeat(text)
+    t = _dedupe_repeated_ngrams(t)
+    return t
+
+
+# -------------------------
+# Speaker turns extraction
+# -------------------------
+
 def _speaker_turns_from_transcribe_json(transcript_json: dict):
     results = transcript_json.get("results", {})
     items = results.get("items", [])
@@ -51,6 +128,7 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
     # Fallback if diarization missing
     if not speaker_segments:
         full_text = (results.get("transcripts", [{}])[0] or {}).get("transcript", "")
+        full_text = _dedupe_text(full_text)
         return 1, [{"speaker": "speaker 1", "text": full_text}]
 
     # Build segment timeline with start/end times
@@ -59,7 +137,7 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
         segments.append({
             "speaker": seg["speaker_label"],
             "start": float(seg["start_time"]),
-            "end": float(seg["end_time"])
+            "end": float(seg["end_time"]),
         })
 
     speaker_lines = []
@@ -73,6 +151,7 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
 
         start_time = float(item["start_time"])
 
+        # Advance segment pointer
         while seg_index < len(segments) and start_time > segments[seg_index]["end"]:
             seg_index += 1
 
@@ -85,7 +164,7 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
             if current_tokens:
                 speaker_lines.append({
                     "speaker": current_speaker,
-                    "text": " ".join(current_tokens)
+                    "text": " ".join(current_tokens),
                 })
             current_speaker = speaker
             current_tokens = []
@@ -95,18 +174,26 @@ def _speaker_turns_from_transcribe_json(transcript_json: dict):
     if current_tokens:
         speaker_lines.append({
             "speaker": current_speaker,
-            "text": " ".join(current_tokens)
+            "text": " ".join(current_tokens),
         })
 
-    # Normalize speaker labels
+    # Normalize speaker labels (stable numbering)
     unique = sorted(set(line["speaker"] for line in speaker_lines if line["speaker"]))
-    mapping = {sp: f"speaker {i+1}" for i, sp in enumerate(unique)}
+    mapping = {sp: f"speaker {i + 1}" for i, sp in enumerate(unique)}
 
     for line in speaker_lines:
         line["speaker"] = mapping.get(line["speaker"], "speaker 1")
+        line["text"] = _dedupe_text(line.get("text", ""))
 
-    return len(unique), speaker_lines
+    # Drop empty lines after dedupe
+    speaker_lines = [l for l in speaker_lines if _normalize_space(l.get("text", ""))]
 
+    return (len(unique) if unique else 1), speaker_lines
+
+
+# -------------------------
+# Handlers
+# -------------------------
 
 def _handle_presign(event):
     payload = _read_json_body(event)
@@ -147,7 +234,6 @@ def _handle_transcribe_start(event):
         },
     )
 
-    # Return immediately (async)
     return _response(200, {"job_name": job_name})
 
 
@@ -177,8 +263,9 @@ def _handle_transcribe_status(event):
         .get("transcripts", [{}])[0]
         .get("transcript", "")
     )
+    transcript_text = _dedupe_text(transcript_text)
 
-    # Save JSON
+    # Save JSON for inspection/debugging
     transcript_key = f"transcripts/{job_name}.json"
     s3.put_object(
         Bucket=TRANSCRIPT_BUCKET,
